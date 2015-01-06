@@ -1,4 +1,4 @@
-add_subdirectory(server)
+add_subdirectory(base_server)
 
 
 #if(CARES_INCLUDE_DIR AND CARES_LIBRARY)

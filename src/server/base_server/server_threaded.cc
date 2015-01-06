@@ -14,34 +14,36 @@
 using namespace muduo;
 using namespace muduo::net;
 
-class ThreadedServer : boost::noncopyable
+void ThreadServer::onMessage(const TcpConnectionPtr& conn, Buffer* buf, Timestamp receiveTime);
 {
- public:
-  ThreadedServer(EventLoop* loop,
-             const InetAddress& listenAddr)
-  : server_(loop, listenAddr, "ThreadedServer"),
-    codec_(boost::bind(&ThreadedServer::onStringMessage, this, _1, _2, _3)),
-    connections_(new ConnectionList)
-  {
-    server_.setConnectionCallback(
-        boost::bind(&Server::onConnection, this, _1));
-    server_.setMessageCallback(
-        boost::bind(&LengthHeaderCodec::onMessage, &codec_, _1, _2, _3));
-  }
+    while (buf->readableBytes() >= kHeaderLen) // kHeaderLen == 4
+    {
+        // FIXME: use Buffer::peekInt32()
+        const void* data = buf->peek();
+        int32_t be32 = *static_cast<const int32_t*>(data); // SIGBUS
+        const int32_t len = sockets::networkToHost32(be32);
+        if (len > 65536 || len < 0)
+        {
+            LOG_ERROR << "Invalid length " << len;
+            conn->shutdown();  // FIXME: disable reading
+            break;
+        }
+        else if (buf->readableBytes() >= len + kHeaderLen)
+        {
+            buf->retrieve(kHeaderLen);
+            string message(buf->peek(), len);
+            messageCallback_(conn, message, receiveTime);
+            buf->retrieve(len);
+        }
+        else
+        {
+            break;
+        }
+    }
+}
 
-  void setThreadNum(int numThreads)
-  {
-    server_.setThreadNum(numThreads);
-  }
-
-  void start()
-  {
-    server_.start();
-  }
-
- private:
-  void onConnection(const TcpConnectionPtr& conn)
-  {
+void ThreadServer::onConnection(const TcpConnectionPtr& conn)
+{
     LOG_INFO << conn->localAddress().toIpPort() << " -> "
         << conn->peerAddress().toIpPort() << " is "
         << (conn->connected() ? "UP" : "DOWN");
@@ -49,22 +51,20 @@ class ThreadedServer : boost::noncopyable
     MutexLockGuard lock(mutex_);
     if (!connections_.unique())
     {
-      connections_.reset(new ConnectionList(*connections_));
+        connections_.reset(new ConnectionList(*connections_));
     }
     assert(connections_.unique());
 
     if (conn->connected())
     {
-      connections_->insert(conn);
+        connections_->insert(conn);
     }
     else
     {
-      connections_->erase(conn);
+        connections_->erase(conn);
     }
-  }
+}
 
-  typedef std::set<TcpConnectionPtr> ConnectionList;
-  typedef boost::shared_ptr<ConnectionList> ConnectionListPtr;
 
   void onStringMessage(const TcpConnectionPtr&,
                        const string& message,
@@ -99,7 +99,7 @@ int main(int argc, char* argv[])
     EventLoop loop;
     uint16_t port = static_cast<uint16_t>(atoi(argv[1]));
     InetAddress serverAddr(port);
-    ThreadedServer server(&loop, serverAddr);
+    ThreadServer server(&loop, serverAddr);
     if (argc > 2)
     {
       server.setThreadNum(atoi(argv[2]));
